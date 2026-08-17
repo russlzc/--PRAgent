@@ -1,97 +1,103 @@
-# PR Review Agent｜可恢复、可追溯的多 Agent 代码审查系统
+**English** | [简体中文](README_ZH.md)
+
+# PR Review Agent
+
+> A recoverable, evidence-driven multi-agent system for pull request review.
 
 [![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
-[![Tests: 53 passed](https://img.shields.io/badge/tests-53%20passed-16a34a.svg)](#验证项目)
+[![Tests: 53 passed](https://img.shields.io/badge/tests-53%20passed-16a34a.svg)](#verification)
 [![License: All Rights Reserved](https://img.shields.io/badge/license-all%20rights%20reserved-6b7280.svg)](LICENSE)
 
-PR Review Agent 接收 Pull Request Diff，把一次代码审查拆成可检查、可恢复的协作过程：先定位新增代码中的候选风险，再由不同角色提出质疑、补充证据、验证修复安全性，最后输出带文件路径、行号、证据和测试建议的结构化 Finding。
+PR Review Agent turns a unified diff into a review process that can be inspected, resumed, and evaluated. Specialist agents propose risks, a critic challenges weak claims, an independent evidence role checks changed-line support, and a verifier plus arbiter decide which findings survive. The result is a structured JSON or Markdown report with file paths, line numbers, severity, evidence, remediation, and test guidance.
 
-> 设计目标不是让多个 Agent 重复说同一件事，而是让每个 Finding 都经历“谁发现、谁质疑、谁复核、为什么保留”的证据链。
+The project is built around one principle: a finding should carry a traceable reason for why it was discovered, challenged, verified, and retained.
 
-## 项目速览
+## What the system provides
 
-| | 系统设计 |
+| Area | Current implementation |
 |---|---|
-| **输入** | Unified Diff、REST API 请求或 GitHub Pull Request Webhook |
-| **执行内核** | 有界 Runtime 管理状态、步骤预算、超时、重试、取消与 Checkpoint |
-| **协作角色** | Planner、Security / Reliability Specialist、Critic、Evidence、Verifier、Arbiter |
-| **输出** | JSON / Markdown Finding，包含规则 ID、路径、行号、严重级别、证据、修复与测试建议 |
-| **本地模式** | SQLite + 进程内队列 + 确定性规则，无需外部模型 |
-| **服务模式** | PostgreSQL、Redis Streams、Prometheus、OpenTelemetry、GitHub App / Token |
-| **质量闭环** | 反馈生成 Prompt 或声明式 Skill 候选；候选通过独立 Validation / Holdout 回放门禁后才激活 |
+| **Inputs** | Unified diffs, REST requests, or GitHub pull request webhooks |
+| **Review runtime** | Bounded steps, timeouts, retries, cancellation, durable checkpoints, and resumable tasks |
+| **Agent protocol** | Planner, security/reliability specialists, critic, evidence, verifier, and arbiter |
+| **Outputs** | JSON and Markdown findings with rule ID, path, line, severity, evidence, fix, and test advice |
+| **Local mode** | SQLite, an in-process queue, and deterministic rules; no external model required |
+| **Service mode** | PostgreSQL, Redis Streams, Prometheus metrics, OpenTelemetry, and GitHub integration |
+| **Quality loop** | Feedback produces prompt or declarative-skill candidates that must pass validation and holdout gates before activation |
 
-## 在线审查与离线演进如何连接
+## Architecture: online review and offline evolution
 
-下面的图根据当前 `ReviewService`、`ReviewHarness`、`AgentRuntime`、`MultiAgentCoordinator` 和 Evolution 模块重新绘制：在线链路负责产出证据型 Finding，离线链路负责决定新的 Prompt 或 Skill 是否有资格进入下一轮审查。
+The diagram below follows the current `ReviewService`, `ReviewHarness`, `AgentRuntime`, `MultiAgentCoordinator`, evaluation, and evolution modules. The online plane produces evidence-backed findings. The offline plane decides whether a candidate prompt or skill is safe enough to enter a later review run.
 
 ```mermaid
 flowchart LR
-    subgraph IN["入口与任务控制"]
-        A["REST API"]
-        B["GitHub Webhook"]
-        A --> C["ReviewService"]
-        B --> C
-        C --> Q["Task Queue"]
-        C --> T[("Task / Trace Store")]
+    subgraph ENTRY["Ingress and task control"]
+        API["REST API"]
+        GH["GitHub Webhook"]
+        SVC["ReviewService"]
+        QUEUE["Task Queue"]
+        STORE[("Task and Trace Store")]
+        API --> SVC
+        GH --> SVC
+        SVC --> QUEUE
+        SVC --> STORE
     end
 
-    subgraph RUN["可恢复审查平面"]
-        Q --> H["ReviewHarness"]
-        H --> R["AgentRuntime"]
-        R --> D["Diff Parser + Context Budget"]
-        D --> P["Planner"]
-        P --> S1["Security Specialist"]
-        P --> S2["Reliability Specialist"]
-        P --> S3["LLM / Dynamic Skill"]
-        S1 --> C1["Critic Challenge"]
-        S2 --> C1
-        S3 --> C1
-        C1 --> E["Independent Evidence Check"]
-        E --> V["Verifier"]
-        V --> AR["Arbiter"]
-        AR --> F["Structured Findings"]
-        R <--> T
+    subgraph ONLINE["Recoverable review plane"]
+        HARNESS["ReviewHarness"]
+        RUNTIME["AgentRuntime"]
+        DIFF["Diff Parser and Context Budget"]
+        PLAN["Planner"]
+        SEC["Security Specialist"]
+        REL["Reliability Specialist"]
+        EXT["Optional LLM or Dynamic Skill"]
+        CRITIC["Critic Challenge"]
+        EVIDENCE["Independent Evidence Check"]
+        VERIFY["Verifier"]
+        ARBITER["Arbiter"]
+        FINDINGS["Structured Findings"]
+
+        QUEUE --> HARNESS --> RUNTIME --> DIFF --> PLAN
+        PLAN --> SEC
+        PLAN --> REL
+        PLAN --> EXT
+        SEC --> CRITIC
+        REL --> CRITIC
+        EXT --> CRITIC
+        CRITIC --> EVIDENCE --> VERIFY --> ARBITER --> FINDINGS
+        RUNTIME <--> STORE
     end
 
-    subgraph LOOP["质量演进平面"]
-        F --> FB["Feedback / Failure Cases"]
-        FB --> CV["Candidate Prompt / Skill"]
-        DS[("Versioned Validation / Holdout Cases")] --> VG
-        DS --> HG
-        CV --> VG{"Validation Gain"}
-        VG -->|"pass"| HG{"Holdout Non-regression"}
-        VG -->|"fail"| RJ["Reject"]
-        HG -->|"pass"| AC["Activate + Keep Rollback"]
-        HG -->|"fail"| RJ
-        AC -.-> S3
+    subgraph OFFLINE["Quality evolution plane"]
+        FEEDBACK["Feedback and Failure Cases"]
+        CANDIDATE["Candidate Prompt or Skill"]
+        DATA[("Versioned Validation and Holdout Cases")]
+        VALIDATION{"Validation Gain"}
+        HOLDOUT{"Holdout Non-regression"}
+        REJECT["Reject"]
+        ACTIVATE["Activate with Rollback"]
+
+        FINDINGS --> FEEDBACK --> CANDIDATE --> VALIDATION
+        DATA --> VALIDATION
+        DATA --> HOLDOUT
+        VALIDATION -->|pass| HOLDOUT
+        VALIDATION -->|fail| REJECT
+        HOLDOUT -->|pass| ACTIVATE
+        HOLDOUT -->|fail| REJECT
+        ACTIVATE -.-> EXT
     end
 ```
 
-## 一个 Finding 要经过哪些关
+## Finding quality gates
 
-### 1. Diff 位置约束
+1. **Changed-line location** — `DiffParser` reconstructs file paths and added-line numbers. Review findings are constrained to code introduced by the pull request.
+2. **Risk-domain assignment** — the planner routes work to security and reliability specialists; an LLM reviewer or a dynamic skill can act as an additional source, not as the final authority.
+3. **Peer challenge** — the critic checks whether a claim is tied to an added line, whether its evidence matches the source, and whether the proposed remediation and test are actionable.
+4. **Independent evidence** — the evidence role separately checks the path, line, source excerpt, and risk condition, leaving a replayable record of why a candidate was retained or rejected.
+5. **Verification and arbitration** — the verifier applies evidence and confidence gates; the arbiter filters, deduplicates, and ranks the approved findings. Automatic repair uses a separate `RepairVerifier` with compilation and optional repository-test gates.
 
-`DiffParser` 先恢复文件路径与新增行号。规则和 Agent 只允许把 Finding 绑定到新增代码，避免把历史问题错误归因给当前 PR。
+## Recoverable execution
 
-### 2. 风险域分工
-
-Planner 根据变更内容创建审查计划，Security 与 Reliability Specialist 并行处理不同风险域；可选 LLM Reviewer 和动态 Skill 作为额外候选来源，而不是最终裁决者。
-
-### 3. Critic 挑战
-
-候选 Finding 需要回答：证据是否真的位于新增行、风险描述是否过度推断、修复建议是否会改变业务语义。被挑战的 Finding 可以修订，也可以被撤回。
-
-### 4. 独立证据复核
-
-Evidence 角色独立于 Specialist 重新检查路径、行号、代码片段和风险条件。复核结果与原候选分开保存，便于回放“为什么留下这条告警”。
-
-### 5. Verifier 与 Arbiter 收口
-
-Verifier 检查证据是否可复现、置信度是否达标，以及修复建议是否具备可操作性；Arbiter 根据证据状态、严重级别和重复键进行过滤、去重与排序，最终生成 JSON 和 Markdown 报告。自动修复则由独立的 `RepairVerifier` 执行编译与可选仓库测试。
-
-## 可恢复执行
-
-审查不是一次不可中断的函数调用。Runtime 把执行拆成三个外层节点，并在节点完成后保存 Checkpoint：
+A review is not treated as one indivisible function call. The runtime checkpoints three outer nodes:
 
 ```text
 PENDING
@@ -103,29 +109,29 @@ PENDING
                         └─> CANCELLED
 ```
 
-- 每个任务都有步骤数与总时长预算；
-- Specialist 失败可以重试，并由替补角色接手；
-- 进程中断后从最近完成节点恢复，不重复已经持久化的阶段；
-- Tool Observation、Agent 消息、门禁结果和错误原因随任务保存；
-- 异步队列支持 lease、ACK、重试与 Dead Letter Queue。
+- Each task has step and wall-clock budgets.
+- Failed specialist assignments can be retried and handed to a substitute role.
+- A restarted worker resumes from the most recently completed checkpoint.
+- Tool observations, agent messages, gate decisions, and failure reasons are persisted with the task.
+- The asynchronous queue supports leases, acknowledgements, retries, and a dead-letter queue.
 
-## 受控离线评测
+## Controlled offline evaluation
 
-仓库包含 100 条 `synthetic-controlled` PR Diff：40 条带风险样本、60 条干净样本。匹配器使用路径、CWE 和标注行区间进行一对一匹配，避免重复 Finding 被重复计分；Validation 与 Holdout 按仓库隔离。
+The repository includes a reproducible `synthetic-controlled` benchmark containing 100 PR diffs: 40 risk-bearing cases and 60 clean cases. Validation and holdout sets are separated by repository. Matching is one-to-one by path, CWE, and annotated line range, so duplicate predictions cannot receive duplicate credit.
 
-| 指标 | 单 Agent 基线 | 多 Agent 候选 |
+| Metric | Single-agent baseline | Multi-agent candidate |
 |---|---:|---:|
 | F1 | `71.4%` | `82.5%` |
-| 高风险召回率 | `84.2%` | `94.7%` |
-| 干净 PR 准确率 | — | `91.7%` |
+| High-risk recall | `84.2%` | `94.7%` |
+| Clean-PR accuracy | — | `91.7%` |
 
-这些数字验证的是受控数据上的回归链路，不等同于真实公开 PR 或生产仓库准确率。数据生成器、指纹、匹配逻辑和指标计算均保存在 `evaluation_data/`、`evaluation_benchmark.py` 与 `evaluation_harness.py` 中。
+These numbers validate the evaluation and regression pipeline on controlled synthetic data. They are **not** measurements from public pull requests or production repositories, and the included release gate deliberately blocks production activation until independently labelled real-world data is provided. The generator, dataset fingerprint, matching rules, and metric implementation are available in `evaluation_data/`, `evaluation_benchmark.py`, and `evaluation_harness.py`.
 
-## 快速运行
+## Quick start
 
-### 本地规则模式
+### Local deterministic mode
 
-本地模式不调用外部模型，可以直接体验完整审查链和 Web 管理台。
+Local mode exercises the review workflow and web console without calling an external model.
 
 ```bash
 git clone https://github.com/russlzc/--PRAgent.git PRAgent
@@ -138,9 +144,9 @@ cp .env.example .env
 python -m pragent
 ```
 
-默认地址为 `http://127.0.0.1:8080`。
+The service listens on `http://127.0.0.1:8080` by default.
 
-提交一段 Unified Diff：
+Submit a unified diff:
 
 ```bash
 curl -X POST http://127.0.0.1:8080/v1/reviews \
@@ -152,7 +158,7 @@ curl -X POST http://127.0.0.1:8080/v1/reviews \
   }'
 ```
 
-异步模式与报告查询：
+Create an asynchronous review and inspect its result:
 
 ```bash
 curl -X POST 'http://127.0.0.1:8080/v1/reviews?async=true' \
@@ -163,9 +169,9 @@ curl http://127.0.0.1:8080/v1/tasks/<task-id>
 curl http://127.0.0.1:8080/v1/tasks/<task-id>/report
 ```
 
-## 模型与认证配置
+## Model and authentication configuration
 
-默认 `PRAGENT_LLM_PROVIDER=local`。需要模型参与时，可以选择 DeepSeek、OpenRouter 或自定义 OpenAI-compatible 端点：
+The default is `PRAGENT_LLM_PROVIDER=local`. To add a model-backed reviewer, select DeepSeek, OpenRouter, or a custom OpenAI-compatible endpoint. For example:
 
 ```dotenv
 PRAGENT_LLM_PROVIDER=custom
@@ -174,7 +180,7 @@ PRAGENT_LLM_API_KEY=<your-token>
 PRAGENT_LLM_MODEL=<model-name>
 ```
 
-服务对局域网或公网开放前必须启用身份验证：
+Enable authentication before exposing the service beyond a trusted local environment:
 
 ```dotenv
 PRAGENT_AUTH_REQUIRED=true
@@ -183,11 +189,11 @@ PRAGENT_BOOTSTRAP_ADMIN_USERNAME=admin
 PRAGENT_BOOTSTRAP_ADMIN_PASSWORD=<strong-password>
 ```
 
-`PRAGENT_AUTH_SECRET` 只用于登录会话，不能与 GitHub Webhook Secret 共用。
+`PRAGENT_AUTH_SECRET` is used for login sessions and must not be reused as the GitHub webhook secret.
 
-## GitHub Pull Request 接入
+## GitHub pull request integration
 
-Webhook 地址为 `/webhooks/github`，处理 `pull_request` 的 `opened`、`reopened` 与 `synchronize` 事件。
+The `/webhooks/github` endpoint handles the `opened`, `reopened`, and `synchronize` pull request actions.
 
 ```dotenv
 PRAGENT_GITHUB_WEBHOOK_SECRET=<independent-random-secret>
@@ -195,17 +201,17 @@ PRAGENT_GITHUB_TOKEN=<fine-grained-token>
 PRAGENT_AUTO_POST_REVIEW=false
 ```
 
-按实际功能授予最小权限：
+Grant only the permissions required by the enabled behavior:
 
-- 读取私有 PR Diff：`Contents: Read`、`Pull requests: Read`；
-- 回写审查结果：`Pull requests: Read and write`；
-- 创建修复分支：`Contents: Read and write`、`Pull requests: Read and write`。
+- Reading private PR diffs: `Contents: Read`, `Pull requests: Read`
+- Posting review results: `Pull requests: Read and write`
+- Creating repair branches: `Contents: Read and write`, `Pull requests: Read and write`
 
-Webhook 验证包含 HMAC-SHA256 签名、Delivery 幂等和事件时间窗检查。
+Webhook handling includes HMAC-SHA256 signature verification, delivery idempotency, and an event-age check.
 
-## Docker 服务模式
+## Docker service mode
 
-Compose 启动 PR Review Agent、PostgreSQL 和 Redis。启动前必须显式提供密码与认证密钥：
+Docker Compose starts PR Review Agent with PostgreSQL and Redis. Set explicit credentials first:
 
 ```dotenv
 PRAGENT_POSTGRES_PASSWORD=<database-password>
@@ -218,78 +224,78 @@ PRAGENT_BOOTSTRAP_ADMIN_PASSWORD=<admin-password>
 docker compose up --build
 ```
 
-该 Compose 文件用于受控部署参考，不包含 TLS、反向代理、备份、Secret Manager 和网络访问策略。
+The Compose file is a controlled deployment reference. It does not include TLS termination, a reverse proxy, backups, a secret manager, or network-access policy.
 
-## 主要 API
+## API surface
 
-| 方法 | 路径 | 用途 |
+| Method | Path | Purpose |
 |---|---|---|
-| `GET` | `/health` | 健康检查 |
-| `GET` | `/metrics` | Prometheus 指标 |
-| `POST` | `/v1/auth/login` | 登录并获取 Token |
-| `POST` | `/v1/reviews` | 创建同步或异步审查 |
-| `GET` | `/v1/tasks/{id}` | 查询状态、Trace 与 Finding |
-| `GET` | `/v1/tasks/{id}/report` | 获取 Markdown 报告 |
-| `POST` | `/v1/tasks/{id}/cancel` | 请求取消 |
-| `POST` | `/v1/tasks/{id}/resume` | 从 Checkpoint 恢复 |
-| `POST` | `/v1/tasks/{id}/feedback` | 提交误报、漏报或坏修复反馈 |
-| `POST` | `/v1/tasks/{id}/fix` | 创建受门禁保护的修复分支 |
-| `POST` | `/webhooks/github` | 接收 Pull Request 事件 |
-| `POST` | `/v1/evolution/auto` | 生成并评测 Prompt 候选 |
-| `POST` | `/v1/skill-evolution/auto` | 生成并评测声明式 Skill 候选 |
+| `GET` | `/health` | Health check |
+| `GET` | `/metrics` | Prometheus metrics |
+| `POST` | `/v1/auth/login` | Authenticate and obtain a token |
+| `POST` | `/v1/reviews` | Create a synchronous or asynchronous review |
+| `GET` | `/v1/tasks/{id}` | Read task state, trace, and findings |
+| `GET` | `/v1/tasks/{id}/report` | Get the Markdown report |
+| `POST` | `/v1/tasks/{id}/cancel` | Request cancellation |
+| `POST` | `/v1/tasks/{id}/resume` | Resume from a checkpoint |
+| `POST` | `/v1/tasks/{id}/feedback` | Record false-positive, missed-issue, or unsafe-fix feedback |
+| `POST` | `/v1/tasks/{id}/fix` | Create a gate-protected repair branch |
+| `POST` | `/webhooks/github` | Receive pull request events |
+| `POST` | `/v1/evolution/auto` | Generate and evaluate a prompt candidate |
+| `POST` | `/v1/skill-evolution/auto` | Generate and evaluate a declarative-skill candidate |
 
-## 代码导航
+## Repository map
 
 ```text
 pragent/
-├── runtime.py              有界 Agent Loop、Tool Registry 与 Checkpoint
-├── harness.py              Planning / Executing / Reviewing 状态编排
-├── agents.py               Planner、Specialist、Critic、Evidence、Arbiter
-├── context_manager.py      Diff 压缩、Token 预算与风险上下文
-├── memory.py               Working / Episodic / Semantic Memory
-├── service.py              审查服务与任务生命周期
-├── store.py                SQLite 持久化
-├── postgres_store.py       PostgreSQL Adapter
-├── task_queue.py           进程内队列与 Redis Streams
-├── evaluation_harness.py   一对一 Finding 匹配与指标
-├── evolution.py            Prompt 候选、门禁、激活与回滚
-├── skill_evolution.py      声明式 Skill 版本链
-├── verifier.py             证据与修复安全验证
-└── api.py                  REST API、Webhook 与管理端点
+├── runtime.py              Bounded agent loop, tool registry, and checkpoints
+├── harness.py              Planning / Executing / Reviewing orchestration
+├── agents.py               Planner, specialists, critic, evidence, and arbiter
+├── context_manager.py      Diff compression, token budgets, and risk context
+├── memory.py               Working, episodic, and semantic memory
+├── service.py              Review service and task lifecycle
+├── store.py                SQLite persistence
+├── postgres_store.py       PostgreSQL adapter
+├── task_queue.py           In-process queue and Redis Streams
+├── evaluation_harness.py   One-to-one finding matching and metrics
+├── evolution.py            Prompt candidates, gates, activation, and rollback
+├── skill_evolution.py      Declarative-skill version chain
+├── verifier.py             Evidence and repair-safety verification
+└── api.py                  REST API, webhook, and administration endpoints
 
-web/                        无构建步骤的管理台
-skills/code-quality/        动态审查 Skill 示例
-evaluation_data/            100 条受控 PR Diff
-scripts/                    评测、演进证明与数据导入
-tests/                      53 项单元与集成测试
+web/                        Build-free management console
+skills/code-quality/        Example dynamic review skill
+evaluation_data/            100 controlled PR diffs
+scripts/                    Evaluation, evolution proof, and data import
+tests/                      53 unit and integration tests
 ```
 
-## 验证项目
+## Verification
 
 ```bash
-# 全量测试
+# Full test suite
 python -m unittest discover -s tests -v
 
-# 受控端到端评测
+# Controlled end-to-end evaluation
 python scripts/run_e2e_evaluation.py
 
-# Prompt 演进证明
+# Prompt-evolution proof
 python scripts/run_prompt_evolution_proof.py
 
-# Compose 配置验证
+# Compose configuration validation
 docker compose config -q
 ```
 
-当前发布版本完成 `53/53` 自动化测试；Docker 默认运行时为 Python 3.11。模型、真实 GitHub App、PostgreSQL 和 Redis 的在线行为仍取决于外部服务与部署配置。
+The current published version passes `53/53` automated tests. The Docker runtime uses Python 3.11. Model providers, live GitHub access, PostgreSQL, and Redis still depend on their external services and deployment configuration.
 
-## 安全边界
+## Security boundaries
 
-- `.env`、Token、私钥、数据库、报告、Trace 和生成输出不进入 Git。
-- 外部模型会接收到 Diff 与审查上下文；发送私有代码前需要确认数据政策。
-- 动态 Skill 运行时限制导入、时间与内存，也可以放入只读、无网络容器；它不是通用恶意代码沙箱。
-- 自动修复只覆盖少量确定性规则，并经过语法与可选测试门禁；合并前仍需人工审查。
-- 多 Agent 共识不等于漏洞真实性，最终结论仍应由代码所有者复核。
+- `.env` files, tokens, private keys, databases, reports, traces, and generated outputs are excluded from version control.
+- External model providers receive diff and review context; confirm their data policy before sending private code.
+- Dynamic skills are restricted by import, time, and memory controls and can run in a read-only, network-disabled container. This is not a general-purpose malicious-code sandbox.
+- Automatic repair covers a limited set of deterministic rules and is guarded by syntax and optional test checks. Every patch still requires human review before merge.
+- Multi-agent agreement is not proof that a vulnerability is real; repository owners remain responsible for the final decision.
 
-## 使用声明
+## License
 
-本仓库仅公开用于项目展示与招聘评估，不授予复制、修改、分发、部署或商业使用许可，详见 [LICENSE](LICENSE)。
+This repository is published for portfolio and recruitment evaluation only. No permission is granted to copy, modify, distribute, deploy, or use it commercially. See [LICENSE](LICENSE).

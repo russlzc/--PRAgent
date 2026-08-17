@@ -1,0 +1,52 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: pragent
+      POSTGRES_USER: pragent
+      POSTGRES_PASSWORD: ${PRAGENT_POSTGRES_PASSWORD:?Set PRAGENT_POSTGRES_PASSWORD in .env}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pragent"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+
+  pragent:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      PRAGENT_HOST: 0.0.0.0
+      PRAGENT_DATABASE_URL: postgresql://pragent:${PRAGENT_POSTGRES_PASSWORD:?Set PRAGENT_POSTGRES_PASSWORD in .env}@postgres:5432/pragent
+      PRAGENT_REDIS_URL: redis://redis:6379/0
+      PRAGENT_ASYNC_WORKERS: 4
+      PRAGENT_SKILLS_DIR: /app/skills
+      PRAGENT_AUTH_REQUIRED: "true"
+      PRAGENT_AUTH_SECRET: ${PRAGENT_AUTH_SECRET:?Set PRAGENT_AUTH_SECRET in .env}
+      PRAGENT_BOOTSTRAP_ADMIN_USERNAME: ${PRAGENT_BOOTSTRAP_ADMIN_USERNAME:?Set PRAGENT_BOOTSTRAP_ADMIN_USERNAME in .env}
+      PRAGENT_BOOTSTRAP_ADMIN_PASSWORD: ${PRAGENT_BOOTSTRAP_ADMIN_PASSWORD:?Set PRAGENT_BOOTSTRAP_ADMIN_PASSWORD in .env}
+    env_file:
+      - path: .env
+        required: false
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+  redis_data:
